@@ -58,11 +58,44 @@ void print_time_to_serial(DateTime const& now);
 
 void setup() 
 {
+    pinMode(RFM95_RST, OUTPUT);
+    digitalWrite(RFM95_RST, HIGH);
+
     Serial.begin(9600);
     while (!Serial);
     delay(100);
     Serial.println("Test av sensormoduler via serial-monitor");
 
+    // manual reset of RFM9x
+    digitalWrite(RFM95_RST, LOW);
+    delay(10);
+    digitalWrite(RFM95_RST, HIGH);
+    delay(10);
+
+
+    // Initiera RFM9x
+    while (!rf95.init()) {
+        Serial.println("LoRa radio init failed");
+        while (1);
+    }
+    Serial.println("LoRa radio init OK!");
+
+    // Defaults after init are 434.0MHz, modulation GFSK_Rb250Fd250, +13dbM
+    if (!rf95.setFrequency(RF95_FREQ)) {
+        Serial.println("setFrequency failed");
+        while (1);
+    }
+    Serial.print("Set Freq to: "); Serial.println(RF95_FREQ);
+  
+    // Defaults after init are 434.0MHz, 13dBm, Bw = 125 kHz, Cr = 4/5, Sf = 128chips/symbol, CRC on
+
+    // The default transmitter power is 13dBm, using PA_BOOST.
+    // If you are using RFM95/96/97/98 modules which uses the PA_BOOST transmitter pin, then 
+    // you can set transmitter powers from 5 to 23 dBm:
+    rf95.setTxPower(23, false);
+
+
+    // Initiera sensorer
     if (!rtc.begin() ) 
     {
         Serial.println("Could not find a valid DS3231 RTC, check wiring!");
@@ -109,57 +142,73 @@ void loop()
     // Hämta tiden från RTC
     DateTime now = rtc.now();
 
+
+    char radiopacket[48];       // Textsträng som ska skickas via LoRa
+
+    // Gör om mätvärden till text
+    char utmp[8];
+    dtostrf(ds18b20.getTempCByIndex(0), 7, 2, utmp);        // [' '(+/-)xx.xx] 7 tecken+nul
+
+    char itmp[8];
+    dtostrf(bme.temperature, 7, 2, itmp);
+
+    char pre[9];
+    dtostrf((bme.pressure / 100), 8, 2, pre);               // [' 'xxxx.xx] 8 tecken+nul
+
+    char hum[7];
+    dtostrf(bme.humidity, 6, 2, hum);                       // [' 'xx.xx] 6 tecken+nul
+
+
     // Skriv ut tid
-    //print_time_to_serial(now);
-    //Serial.println();
-    char buf[] = "YYYY-MM-DD hh:mm:ss";
-    Serial.println(now.toString(buf));
+    char* time_buf = "YYYY-MM-DD hh:mm:ss";
 
-    // Skriv ut utomhus-temperatur
-    Serial.print("Utomhus-temperatur: "); 
-    Serial.print(ds18b20.getTempCByIndex(0));
-    Serial.println();
+    // Sätt in tidsstämpel i radiopacket enligt format ovan
+    strcpy(radiopacket, now.toString(time_buf));
+    
+    // Lägg till övrig data i radiopacket-strängen
+    strcat(radiopacket, utmp);
+    strcat(radiopacket, itmp);
+    strcat(radiopacket, pre);
+    strcat(radiopacket, hum);
 
-    // Skriv ut innhomhus-temperatur + luft-tryck/fuktighet
-    Serial.print("Innomhus-temperatur: ");
-    Serial.print(bme.temperature);
-    Serial.println(" *C");
+    // Skicka datan
 
-    Serial.print("Lufttryck: ");
-    Serial.print(bme.pressure / 100.0);
-    Serial.println(" hPa");
+    Serial.println("Sending to rf95_server");
+    // Send a message to rf95_server
+    
 
-    Serial.print("Luftfuktighet: ");
-    Serial.print(bme.humidity);
-    Serial.println(" %");
+    Serial.print("Sending "); Serial.println(radiopacket);
+    
+    Serial.println("Sending..."); delay(10);
+    rf95.send((uint8_t *)radiopacket, sizeof(radiopacket));
 
-    // Vänta och loopa
-    Serial.println();
-    delay(2000);
+    Serial.println("Waiting for packet to complete..."); delay(10);
+    rf95.waitPacketSent();
+    // Now wait for a reply
+    uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
+    uint8_t len = sizeof(buf);
 
-}
+    Serial.println("Waiting for reply..."); delay(10);
+    if (rf95.waitAvailableTimeout(1000))
+    { 
+        // Should be a reply message for us now   
+        if (rf95.recv(buf, &len))
+    {
+        Serial.print("Got reply: ");
+        Serial.println((char*)buf);
+        Serial.print("RSSI: ");
+        Serial.println(rf95.lastRssi(), DEC);    
+        }
+        else
+        {
+        Serial.println("Receive failed");
+        }
+    }
+    else
+    {
+        Serial.println("No reply, is there a listener around?");
+    }
 
-void print_time_to_serial(DateTime const& now)
-{
-    Serial.print(now.year(), DEC);
-    Serial.print('-');
-    if (now.month() < 10)
-        Serial.print('0');
-    Serial.print(now.month(), DEC);
-    Serial.print('-');
-    if (now.day() < 10) 
-        Serial.print('0');
-    Serial.print(now.day(), DEC);
-    Serial.print("  ");
-    if (now.hour() < 10) 
-        Serial.print('0');
-    Serial.print(now.hour(), DEC);
-    Serial.print(':');
-    if (now.minute() < 10) 
-        Serial.print('0');
-    Serial.print(now.minute(), DEC);
-    Serial.print(':');
-    if (now.second() < 10) 
-        Serial.print('0');
-    Serial.print(now.second(), DEC);
+    delay(1000);
+
 }
